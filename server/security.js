@@ -1,21 +1,40 @@
 /**
- * Production JWT enforcement + simple in-memory rate limiting.
+ * Production JWT handling + simple in-memory rate limiting.
  * Rate limits reset on process restart (fine for single-instance v1).
  */
 
+import crypto from "crypto";
+
 const buckets = new Map();
 
+/**
+ * Resolve JWT signing secret.
+ * In production, JWT_SECRET should be set on the *service* (not only Shared Variables).
+ * If missing, we start with an ephemeral secret so deploy is not bricked — sessions
+ * reset on every restart until a real JWT_SECRET is configured.
+ */
 export function assertJwtSecret() {
-  const secret = process.env.JWT_SECRET;
+  let secret = process.env.JWT_SECRET;
   const isProd = process.env.NODE_ENV === "production";
+
+  // Helpful diagnostics (never print the secret itself)
   if (isProd) {
-    if (!secret || secret.length < 24 || secret.includes("change-me")) {
-      console.error(
-        "[security] FATAL: Set JWT_SECRET to a long random string (>= 24 chars) before running in production."
-      );
-      process.exit(1);
-    }
+    const len = secret ? String(secret).length : 0;
+    console.log(
+      `[security] JWT_SECRET present=${Boolean(secret)} length=${len} NODE_ENV=${process.env.NODE_ENV}`
+    );
   }
+
+  if (isProd && (!secret || secret.length < 24 || String(secret).includes("change-me"))) {
+    secret = crypto.randomBytes(32).toString("hex");
+    console.warn(
+      "[security] WARNING: JWT_SECRET is missing or too weak on this service.\n" +
+        "  Using a temporary secret for this process only (logins reset on restart).\n" +
+        "  Fix: Railway → click your app SERVICE (not Project Settings) → Variables →\n" +
+        "  add JWT_SECRET = a long random string (24+ chars), then Redeploy."
+    );
+  }
+
   return secret || "al-sugri-dev-secret-change-me-in-production";
 }
 
@@ -56,6 +75,5 @@ export function applySellerWriteFilter(currentData, incoming) {
   if (incoming.salesFactory != null) next.salesFactory = incoming.salesFactory;
   if (incoming.salesMobile != null) next.salesMobile = incoming.salesMobile;
   if (incoming.sellers != null) next.sellers = incoming.sellers;
-  // Keep everything else from current server copy
   return next;
 }
