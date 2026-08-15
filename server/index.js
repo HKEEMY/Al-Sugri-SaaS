@@ -19,7 +19,10 @@ import {
   listInvites,
   acceptInvite,
   getInvitePreview,
+  deleteAccount,
+  findOrCreateOAuthUser,
 } from "./auth.js";
+import { buildAuthorizeUrl, handleCallback } from "./oauth.js";
 import { rateLimit, applySellerWriteFilter } from "./security.js";
 import {
   listNotifications,
@@ -71,6 +74,8 @@ const authLimiter = rateLimit({
   max: 20,
   keyFn: (req) => `auth:${req.ip}:${req.path}`,
 });
+
+const FRONTEND_URL = (process.env.APP_URL || "").replace(/\/$/, "");
 
 // ---------- Public ----------
 app.get("/api/health", (_req, res) => {
@@ -158,10 +163,43 @@ app.post("/api/invites/:token/accept", authLimiter, (req, res) => {
   }
 });
 
+// ---- Social sign-in (Google / Facebook / X) ----
+app.get("/api/auth/:provider/start", authLimiter, (req, res) => {
+  try {
+    res.redirect(buildAuthorizeUrl(req.params.provider));
+  } catch (err) {
+    res.redirect(`${FRONTEND_URL}/?authError=${encodeURIComponent(err.message)}`);
+  }
+});
+
+app.get("/api/auth/:provider/callback", authLimiter, async (req, res) => {
+  try {
+    const profile = await handleCallback(req.params.provider, req.query);
+    const result = findOrCreateOAuthUser({
+      provider: req.params.provider,
+      providerId: profile.providerId,
+      email: profile.email,
+      name: profile.name,
+    });
+    res.redirect(`${FRONTEND_URL}/#oauth_token=${encodeURIComponent(result.token)}`);
+  } catch (err) {
+    res.redirect(`${FRONTEND_URL}/?authError=${encodeURIComponent(err.message || "Sign-in failed")}`);
+  }
+});
+
 // ---------- Authenticated ----------
 app.get("/api/me", authRequired, (req, res) => {
   const orgs = listOrgsForUser(req.user.id);
   res.json({ user: req.user, orgs });
+});
+
+app.delete("/api/account", authRequired, (req, res) => {
+  try {
+    const result = deleteAccount(req.user.id);
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || "Could not delete account" });
+  }
 });
 
 app.get("/api/orgs", authRequired, (req, res) => {

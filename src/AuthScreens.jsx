@@ -49,6 +49,60 @@ const btnGhost = {
   cursor: "pointer",
 };
 
+const SOCIAL_PROVIDERS = [
+  { id: "google", label: "Google", badgeBg: "#fff", badgeColor: "#000", glyph: "G" },
+  { id: "facebook", label: "Facebook", badgeBg: "#1877F2", badgeColor: "#fff", glyph: "f" },
+  { id: "x", label: "X", badgeBg: "#000", badgeColor: "#fff", glyph: "𝕏" },
+];
+
+function OAuthButtons() {
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {SOCIAL_PROVIDERS.map((p) => (
+          <a
+            key={p.id}
+            href={api.oauthStartUrl(p.id)}
+            style={{
+              ...btnGhost,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 10,
+              textDecoration: "none",
+              boxSizing: "border-box",
+            }}
+          >
+            <span
+              style={{
+                width: 20,
+                height: 20,
+                borderRadius: 5,
+                background: p.badgeBg,
+                color: p.badgeColor,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 12,
+                fontWeight: 800,
+                flexShrink: 0,
+              }}
+            >
+              {p.glyph}
+            </span>
+            Continue with {p.label}
+          </a>
+        ))}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0" }}>
+        <div style={{ flex: 1, height: 1, background: C.line }} />
+        <span style={{ fontSize: 12, color: C.mute }}>or</span>
+        <div style={{ flex: 1, height: 1, background: C.line }} />
+      </div>
+    </div>
+  );
+}
+
 function Shell({ children, title, subtitle }) {
   return (
     <div
@@ -134,6 +188,7 @@ export function LoginScreen({ onSuccess, onSwitchToSignup, onForgot }) {
 
   return (
     <Shell title="Al Sugri Ops" subtitle="Sign in to your factory workspace">
+      <OAuthButtons />
       <form onSubmit={submit}>
         <label style={{ display: "block", fontSize: 12, color: C.mute, marginBottom: 6 }}>Email</label>
         <input
@@ -212,6 +267,7 @@ export function SignupScreen({ onSuccess, onSwitchToLogin }) {
       title="Create workspace"
       subtitle="One account, one factory to start. You can add more later."
     >
+      <OAuthButtons />
       <form onSubmit={submit}>
         <label style={{ display: "block", fontSize: 12, color: C.mute, marginBottom: 6 }}>Your name</label>
         <input
@@ -269,11 +325,27 @@ export function SignupScreen({ onSuccess, onSwitchToLogin }) {
   );
 }
 
-export function OrgPicker({ user, orgs, onSelect, onCreate, onLogout }) {
+export function OrgPicker({ user, orgs, onSelect, onCreate, onLogout, onAccountDeleted }) {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
+  const confirmDelete = async () => {
+    setDeleteError("");
+    setDeleting(true);
+    try {
+      await api.deleteAccount();
+      onAccountDeleted?.();
+    } catch (err) {
+      setDeleteError(err.message || "Could not delete account");
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const create = async (e) => {
     e.preventDefault();
@@ -358,6 +430,54 @@ export function OrgPicker({ user, orgs, onSelect, onCreate, onLogout }) {
       >
         Sign out
       </button>
+
+      <div style={{ marginTop: 24, paddingTop: 18, borderTop: `1px solid ${C.line}` }}>
+        {!confirmingDelete ? (
+          <button
+            type="button"
+            onClick={() => setConfirmingDelete(true)}
+            style={{ ...btnGhost, color: C.coral, borderColor: "transparent", fontSize: 12 }}
+          >
+            Delete account
+          </button>
+        ) : (
+          <div>
+            <div style={{ fontSize: 13, color: C.mute, marginBottom: 10, lineHeight: 1.5 }}>
+              This permanently deletes your account and any factory only you belong to. If you
+              solely own a factory with other members, transfer ownership or remove them first.
+            </div>
+            {deleteError && (
+              <div style={{ color: C.coral, fontSize: 13, marginBottom: 10 }}>{deleteError}</div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                disabled={deleting}
+                style={{
+                  ...btnPrimary,
+                  flex: 1,
+                  background: C.coral,
+                  color: "#2B0B06",
+                  opacity: deleting ? 0.7 : 1,
+                }}
+              >
+                {deleting ? "Deleting…" : "Yes, delete permanently"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmingDelete(false);
+                  setDeleteError("");
+                }}
+                style={{ ...btnGhost, flex: 1 }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </Shell>
   );
 }

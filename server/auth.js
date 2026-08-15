@@ -113,7 +113,17 @@ export function loginUser({ email, password }) {
   const emailNorm = String(email || "").trim().toLowerCase();
   const s = store.read();
   const user = s.users.find((u) => u.email === emailNorm);
-  if (!user || !verifyPassword(password, user.password_hash)) {
+  if (!user) {
+    const err = new Error("Invalid email or password");
+    err.status = 401;
+    throw err;
+  }
+  if (!user.password_hash) {
+    const err = new Error("This account signs in with Google, Facebook, or X — use that button instead");
+    err.status = 401;
+    throw err;
+  }
+  if (!verifyPassword(password, user.password_hash)) {
     const err = new Error("Invalid email or password");
     err.status = 401;
     throw err;
@@ -226,6 +236,125 @@ export function getUserById(userId) {
   const u = s.users.find((x) => x.id === userId);
   if (!u) return null;
   return { id: u.id, email: u.email, name: u.name, created_at: u.created_at };
+}
+
+/** Permanently deletes a user's account.
+ * - Orgs where this user is the sole member are deleted entirely, including their data.
+ * - Orgs with other members but no other owner block deletion (transfer ownership first).
+ * - Orgs with another owner just lose this user's membership. */
+export function deleteAccount(userId) {
+  return store.update((s) => {
+    const user = s.users.find((u) => u.id === userId);
+    if (!user) {
+      const err = new Error("User not found");
+      err.status = 404;
+      throw err;
+    }
+
+    const memberships = s.memberships.filter((m) => m.user_id === userId);
+
+    for (const m of memberships) {
+      if (m.role !== "owner") continue;
+      const others = s.memberships.filter((x) => x.org_id === m.org_id && x.user_id !== userId);
+      const anotherOwner = others.some((x) => x.role === "owner");
+      if (others.length > 0 && !anotherOwner) {
+        const org = s.organizations.find((o) => o.id === m.org_id);
+        const err = new Error(
+          `You're the only owner of "${org?.name || "an organization"}", which has other members. Transfer ownership or remove them before deleting your account.`
+        );
+        err.status = 409;
+        throw err;
+      }
+    }
+
+    for (const m of memberships) {
+      if (m.role !== "owner") continue;
+      const others = s.memberships.filter((x) => x.org_id === m.org_id && x.user_id !== userId);
+      if (others.length === 0) {
+        s.organizations = s.organizations.filter((o) => o.id !== m.org_id);
+        delete s.orgData[m.org_id];
+        s.invites = (s.invites || []).filter((i) => i.orgId !== m.org_id);
+      }
+    }
+
+    s.memberships = s.memberships.filter((m) => m.user_id !== userId);
+    s.users = s.users.filter((u) => u.id !== userId);
+    s.passwordResets = (s.passwordResets || []).filter((r) => r.userId !== userId);
+
+    return { ok: true };
+  });
+}
+
+function listOrgsForUserInPlace(s, userId) {
+  return s.memberships
+    .filter((m) => m.user_id === userId)
+    .map((m) => {
+      const o = s.organizations.find((org) => org.id === m.org_id);
+      if (!o) return null;
+      return publicOrg(o, m);
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Finds or creates a user from an OAuth profile (Google / Facebook / X).
+ * Matches first by provider+providerId, then by email. First-time sign-ins
+ * get their own workspace, same as email signup. */
+export function findOrCreateOAuthUser({ provider, providerId, email, name }) {
+  const emailNorm = email ? String(email).trim().toLowerCase() : null;
+
+  return store.update((s) => {
+    let user = s.users.find((u) =>
+      (u.oauthAccounts || []).some((a) => a.provider === provider && a.providerId === providerId)
+    );
+
+    if (!user && emailNorm) {
+      user = s.users.find((u) => u.email === emailNorm);
+      if (user) {
+        user.oauthAccounts = user.oauthAccounts || [];
+        user.oauthAccounts.push({ provider, providerId });
+      }
+    }
+
+    let isNewUser = false;
+    if (!user) {
+      isNewUser = true;
+      const displayName = (name || (emailNorm ? emailNorm.split("@")[0] : null) || `${provider} user`).trim();
+      user = {
+        id: uid(),
+        email: emailNorm || `${provider}_${providerId}@accounts.al-sugri-saas.local`,
+        password_hash: null,
+        name: displayName,
+        created_at: Date.now(),
+        oauthAccounts: [{ provider, providerId }],
+      };
+      s.users.push(user);
+    }
+
+    let orgs = listOrgsForUserInPlace(s, user.id);
+    if (isNewUser || orgs.length === 0) {
+      const orgId = uid();
+      const now = Date.now();
+      const orgDisplay = `${user.name}'s Workspace`;
+      s.organizations.push({ id: orgId, name: orgDisplay, slug: slugify(orgDisplay), created_at: now, branding: defaultBranding() });
+      s.memberships.push({
+        id: uid(),
+        user_id: user.id,
+        org_id: orgId,
+        role: "owner",
+        seller_name: null,
+        created_at: now,
+      });
+      s.orgData[orgId] = { data: emptyFactoryData(), version: 1, updated_at: now };
+      orgs = listOrgsForUserInPlace(s, user.id);
+    }
+
+    return {
+      user: { id: user.id, email: user.email, name: user.name },
+      orgs,
+      token: signToken({ sub: user.id, email: user.email }),
+    };
+  });
 }
 
 

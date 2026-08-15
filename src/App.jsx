@@ -85,6 +85,17 @@ export default function App() {
   const resetToken = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("reset") : null;
   const inviteToken = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("invite") : null;
 
+  // Consume the token dropped in the URL hash after a Google/Facebook/X
+  // redirect, before the "restore session" effect below reads it.
+  useState(() => {
+    if (typeof window !== "undefined" && window.location.hash.startsWith("#oauth_token=")) {
+      const token = decodeURIComponent(window.location.hash.slice("#oauth_token=".length));
+      api.setToken(token);
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+    return null;
+  });
+
   const [session, setSession] = useState(null); // { user, orgs, token }
   const [org, setOrg] = useState(null); // selected org membership object
   const [bootstrapping, setBootstrapping] = useState(true);
@@ -398,6 +409,7 @@ export default function App() {
         onSelect={handleSelectOrg}
         onCreate={handleCreateOrg}
         onLogout={handleLogout}
+        onAccountDeleted={handleLogout}
       />
     );
   }

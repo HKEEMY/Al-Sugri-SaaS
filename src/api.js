@@ -138,6 +138,14 @@ export function fetchMe() {
   return request("/api/me");
 }
 
+export function deleteAccount() {
+  return request("/api/account", { method: "DELETE" });
+}
+
+export function oauthStartUrl(provider) {
+  return `/api/auth/${provider}/start`;
+}
+
 export function createOrg(name) {
   return request("/api/orgs", {
     method: "POST",
