@@ -4,8 +4,9 @@
  * Dev default: console logging (no external account needed).
  * Production: set env vars to wire real providers.
  *
- * EMAIL_PROVIDER=console|smtp
- * SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM
+ * EMAIL_PROVIDER=console|resend|smtp
+ *   resend (recommended — no SMTP setup): RESEND_API_KEY, EMAIL_FROM
+ *   smtp: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM
  * SMS_PROVIDER=console|twilio
  * TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM
  * APP_BASE_URL=https://your-app.example.com  (links in emails)
@@ -17,6 +18,33 @@ const APP_BASE = process.env.APP_BASE_URL || "http://localhost:5173";
 
 export async function sendEmail({ to, subject, text, html }) {
   const provider = (process.env.EMAIL_PROVIDER || "console").toLowerCase();
+
+  if (provider === "resend" && process.env.RESEND_API_KEY) {
+    try {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: process.env.EMAIL_FROM || "Al Sugri Ops <onboarding@resend.dev>",
+          to,
+          subject,
+          text,
+          html: html || text,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Resend ${res.status}: ${detail}`);
+      }
+      return { ok: true, provider: "resend" };
+    } catch (err) {
+      console.error("[email] Resend failed:", err.message);
+    }
+  }
+
   if (provider === "smtp" && process.env.SMTP_HOST) {
     // Lightweight SMTP via raw fetch is not ideal; use nodemailer when installed.
     // Fallback: log + try dynamic import
@@ -40,10 +68,12 @@ export async function sendEmail({ to, subject, text, html }) {
         });
         return { ok: true, provider: "smtp" };
       }
+      console.error("[email] SMTP requested but nodemailer isn't installed — run: npm install nodemailer");
     } catch (err) {
       console.error("[email] SMTP failed:", err.message);
     }
   }
+
   console.log(`[email:console] to=${to}\n  subject=${subject}\n  ${text}`);
   return { ok: true, provider: "console" };
 }
