@@ -37,6 +37,7 @@ const money = (n) => `${CURRENCY}${fmt(n)}`;
 
 const emptyDB = () => ({
   inventory: { emptyBags: 0, finishedBags: 0 },
+  koyos: ["Koyo 1", "Koyo 2"],
   intake: [],
   rolls: [],
   production: [],
@@ -289,15 +290,21 @@ export default function App() {
         setOnline(true);
       })
       .catch((err) => {
-        if (err.status === 409) {
+        if (err.status === 409 || (err.status >= 400 && err.status < 500)) {
           api.fetchOrgDB(orgId).then((serverDB) => {
             api.cacheDB(orgId, serverDB);
             api.setDirty(orgId, false);
             unsynced.current = false;
             setDb(stripMeta(serverDB));
             setDbVersion(serverDB.version);
-            showToast("Conflict — loaded latest from server. Re-apply your change.");
-          }).catch(() => setOnline(false));
+            setOnline(true);
+            showToast(err.status === 409
+              ? "Conflict — loaded latest from server. Re-apply your change."
+              : (err.message || "Change rejected by the server."));
+          }).catch(() => {
+            setOnline(false);
+            showToast(err.message || "Change rejected by the server.");
+          });
         } else {
           setOnline(false);
           showToast("Saved on this device — will sync when online");
@@ -483,6 +490,51 @@ const inputStyle = {
   minHeight: 46,
 };
 
+function KoyoSettings({ db, save, showToast }) {
+  const [name, setName] = useState("");
+  const koyos = getKoyos(db);
+
+  const addKoyo = () => {
+    const clean = name.trim();
+    if (!clean) return showToast("Enter a Koyo name");
+    if (koyos.some((k) => k.toLowerCase() === clean.toLowerCase())) return showToast("That Koyo already exists");
+    save({ ...db, koyos: [...koyos, clean] });
+    setName("");
+    showToast(`${clean} added`);
+  };
+
+  const removeKoyo = (koyo) => {
+    const usedByRoll = db.rolls.some((r) => r.row === koyo);
+    const usedByProduction = db.production.some((p) => p.koyo === koyo);
+    if (usedByRoll || usedByProduction) {
+      return showToast(`${koyo} cannot be removed because it is used by existing records`);
+    }
+    if (koyos.length <= 1) return showToast("Keep at least one Koyo");
+    save({ ...db, koyos: koyos.filter((k) => k !== koyo) });
+    showToast(`${koyo} removed`);
+  };
+
+  return (
+    <Card title="Koyo management">
+      <div style={{ fontSize: 13, color: C.mute, lineHeight: 1.5, marginBottom: 12 }}>
+        Add as many Koyos as this factory operates. A Koyo must have an assigned active roll before production can be recorded.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Koyo 3" style={{ ...inputStyle, flex: "1 1 220px" }} />
+        <button onClick={addKoyo} style={ghostBtn}><Plus size={15} /> Add Koyo</button>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {koyos.map((k) => (
+          <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 10px" }}>
+            <span>{k}</span>
+            <button onClick={() => removeKoyo(k)} title={`Remove ${k}`} style={{ ...ghostBtn, padding: 6, color: C.mute }}><X size={14} /></button>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 // ================= Shell =================
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["Owner", "Supervisor"] },
@@ -561,13 +613,7 @@ function Shell({ db, save, tab, setTab, role, sellerName, toast, showToast, onli
                 <TeamInvitesPanel orgId={org.id} colors={C} showToast={showToast} />
               </Card>
             )}
-            <Card title="Security & alerts">
-              <div style={{ fontSize: 13, color: C.mute, lineHeight: 1.5 }}>
-                <p style={{ marginTop: 0 }}>Passwords are hashed. Login attempts are rate-limited. Sellers can only change sales data.</p>
-                <p>In-app alerts fire when sellers have outstanding balances. Email/SMS use the server console in development; configure SMTP or Twilio for production delivery.</p>
-                <p style={{ marginBottom: 0 }}>Online/offline status is shown in the header — changes made offline sync when the connection returns.</p>
-              </div>
-            </Card>
+            <KoyoSettings db={db} save={save} showToast={showToast} />
           </>
         )}
       </main>
@@ -739,7 +785,7 @@ function Dashboard({ db }) {
       <Card title="Stock levels">
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
           <Stat label="Raw material" value={`${fmt(rawStockKg(db))} kg`} sub={`${db.rolls.filter(r => r.remainingKg > 0).length} roll(s) on hand`} />
-          <Stat label="Empty bags" value={fmt(db.inventory.emptyBags)} />
+          <Stat label="Packaging bags" value={fmt(db.inventory.emptyBags)} />
           <Stat label="Remaining stock" value={fmt(db.inventory.finishedBags)} tone={db.inventory.finishedBags < 50 ? "warn" : undefined} />
         </div>
       </Card>
@@ -838,24 +884,24 @@ function Inventory({ db, save, showToast }) {
   const receiveEmptyBags = () => {
     const n = Number(receiveBags) || 0;
     if (!n) return showToast("Enter how many bags were received");
-    const entry = { id: uid(), date: todayStr(), type: "Empty bags", material: "", quantity: n, unit: "bags" };
+    const entry = { id: uid(), date: todayStr(), type: "Packaging bags", material: "", quantity: n, unit: "bags" };
     save({
       ...db,
       intake: [entry, ...db.intake],
       inventory: { ...db.inventory, emptyBags: db.inventory.emptyBags + n },
     });
     setReceiveBags("");
-    showToast(`Received ${fmt(n)} empty bags`);
+    showToast(`Received ${fmt(n)} packaging bags`);
   };
 
   const deleteIntake = (entry) => {
-    if (entry.type === "Empty bags") {
+    if ((entry.type === "Packaging bags" || entry.type === "Empty bags")) {
       save({
         ...db,
         intake: db.intake.filter((r) => r.id !== entry.id),
         inventory: { ...db.inventory, emptyBags: Math.max(0, db.inventory.emptyBags - entry.quantity) },
       });
-      showToast("Entry deleted, empty bag count reversed");
+      showToast("Entry deleted, packaging-bag count reversed");
       return;
     }
     // Raw material: only remove the rolls it created if none of them have
@@ -895,7 +941,7 @@ function Inventory({ db, save, showToast }) {
       <Card title="Current stock">
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
           <Stat label="Raw material" value={`${fmt(rawStockKg(db))} kg`} sub={`${activeRolls.length} roll(s) on hand`} />
-          <Stat label="Empty bags" value={fmt(db.inventory.emptyBags)} />
+          <Stat label="Packaging bags" value={fmt(db.inventory.emptyBags)} />
           <Stat label="Finished (sellable)" value={fmt(db.inventory.finishedBags)} />
         </div>
       </Card>
@@ -942,7 +988,7 @@ function Inventory({ db, save, showToast }) {
         <PrimaryBtn onClick={addIntake}><Plus size={16} /> Log intake</PrimaryBtn>
       </Card>
 
-      <Card title="Receive empty bags">
+      <Card title="Receive packaging bags">
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div style={{ flex: "1 1 160px" }}>
             <Field label="Bags received">
@@ -955,7 +1001,7 @@ function Inventory({ db, save, showToast }) {
 
       <Card title="Manual stock correction" right={<span style={{ fontSize: 11, color: C.mute }}>use for mistakes only</span>}>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <Field label="Empty bags (+/-)"><input type="number" value={adjBags.empty} onChange={(e) => setAdjBags({ ...adjBags, empty: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Packaging bags (+/-)"><input type="number" value={adjBags.empty} onChange={(e) => setAdjBags({ ...adjBags, empty: e.target.value })} style={inputStyle} /></Field>
           <Field label="Finished bags (+/-)"><input type="number" value={adjBags.finished} onChange={(e) => setAdjBags({ ...adjBags, finished: e.target.value })} style={inputStyle} /></Field>
         </div>
         <PrimaryBtn onClick={applyAdj}><Check size={16} /> Apply correction</PrimaryBtn>
@@ -998,11 +1044,15 @@ function DeleteBtn({ onConfirm, confirmMsg }) {
   );
 }
 
-// Only two Koyos in the factory — a fixed list keeps naming consistent
-// instead of free text drifting ("Line 1", "line1", "row 1", ...).
-const KOYOS = ["Koyo 1", "Koyo 2"];
+// Koyos are organization-specific. Older workspaces are migrated to the
+// default Koyo 1 / Koyo 2 list by the server and by the UI fallback below.
+function getKoyos(db) {
+  const list = Array.isArray(db?.koyos) ? db.koyos : [];
+  return list.length ? list : ["Koyo 1", "Koyo 2"];
+}
 
 function Production({ db, save, showToast }) {
+  const koyos = getKoyos(db);
   const [f, setF] = useState({ date: todayStr(), koyo: "", rollId: "", rawUsedKg: "", produced: "", leakage: "" });
   const [assignKoyo, setAssignKoyo] = useState({});
 
@@ -1011,6 +1061,12 @@ function Production({ db, save, showToast }) {
   const onKoyoRolls = activeRolls.filter((r) => r.row);
   const inStockRolls = activeRolls.filter((r) => !r.row);
   const selectedRoll = db.rolls.find((r) => r.id === f.rollId);
+  const selectedKoyoRoll = db.rolls.find((r) => r.row === f.koyo && r.remainingKg > 0);
+  const availablePackaging = Number(db.inventory?.emptyBags) || 0;
+
+  useEffect(() => {
+    setF((current) => ({ ...current, date: todayStr() }));
+  }, []);
 
   const assignToKoyo = (rollId) => {
     const koyo = assignKoyo[rollId] || "";
@@ -1021,20 +1077,39 @@ function Production({ db, save, showToast }) {
   };
 
   const submit = () => {
-    const rawUsed = Number(f.rawUsedKg) || 0;
-    const produced = Number(f.produced) || 0;
-    const leakage = Number(f.leakage) || 0;
-    if (!produced) return showToast("Enter bags produced");
+    const rawUsed = Number(f.rawUsedKg);
+    const produced = Number(f.produced);
+    const leakage = Number(f.leakage);
 
-    const entry = { id: uid(), date: f.date, koyo: f.koyo, rollId: f.rollId || "", rollLabel: selectedRoll?.label || "", rawUsedKg: rawUsed, produced, leakage, net: produced - leakage };
-
-    let rolls = db.rolls;
-    if (f.rollId) {
-      if (rawUsed > (selectedRoll?.remainingKg || 0)) showToast("⚠ more than this roll has left — check the roll");
-      rolls = db.rolls.map((r) => r.id === f.rollId ? { ...r, remainingKg: Math.max(0, r.remainingKg - rawUsed) } : r);
-    } else if (rawUsed > 0) {
-      showToast("⚠ not linked to a roll — this kg won't reduce any specific roll's remaining weight");
+    if (!f.koyo) return showToast("Select a Koyo before recording production");
+    if (!f.rollId) return showToast("Assign a roll to the selected Koyo before recording production");
+    if (!selectedRoll) return showToast("Selected roll could not be found");
+    if (selectedRoll.row !== f.koyo) return showToast("The selected roll is not assigned to this Koyo");
+    if (!(produced > 0)) return showToast("Enter bags produced");
+    if (!(rawUsed > 0)) return showToast("Enter raw material used");
+    if (!(leakage >= 0 && leakage <= produced)) return showToast("Leakages/rejects must be between 0 and bags produced");
+    if (produced > availablePackaging) {
+      return showToast(`Production blocked: only ${fmt(availablePackaging)} packaging bags are available`);
     }
+    if (rawUsed > (Number(selectedRoll.remainingKg) || 0)) {
+      return showToast(`Production blocked: selected roll has only ${fmt(selectedRoll.remainingKg)} kg remaining`);
+    }
+
+    const entry = {
+      id: uid(),
+      date: todayStr(),
+      koyo: f.koyo,
+      rollId: f.rollId,
+      rollLabel: selectedRoll.label || "",
+      rawUsedKg: rawUsed,
+      produced,
+      leakage,
+      net: produced - leakage,
+    };
+
+    const rolls = db.rolls.map((r) =>
+      r.id === f.rollId ? { ...r, remainingKg: r.remainingKg - rawUsed } : r
+    );
 
     const next = {
       ...db,
@@ -1042,16 +1117,21 @@ function Production({ db, save, showToast }) {
       rolls,
       inventory: {
         ...db.inventory,
-        emptyBags: Math.max(0, db.inventory.emptyBags - produced),
-        finishedBags: db.inventory.finishedBags + (produced - leakage),
+        emptyBags: availablePackaging - produced,
+        finishedBags: (Number(db.inventory?.finishedBags) || 0) + (produced - leakage),
       },
     };
+
     save(next);
-    setF({ date: f.date, koyo: f.koyo, rollId: f.rollId, rawUsedKg: "", produced: "", leakage: "" });
+    setF({ date: todayStr(), koyo: f.koyo, rollId: f.rollId, rawUsedKg: "", produced: "", leakage: "" });
     showToast(`Logged: ${fmt(produced - leakage)} sellable bags`);
   };
 
   const deleteRun = (entry) => {
+    const isToday = entry.date === todayStr();
+    if (!isToday) {
+      return showToast("Historical production cannot be deleted from this screen");
+    }
     const rolls = entry.rollId
       ? db.rolls.map((r) => r.id === entry.rollId ? { ...r, remainingKg: Math.min(r.loadedKg, r.remainingKg + entry.rawUsedKg) } : r)
       : db.rolls;
@@ -1077,7 +1157,7 @@ function Production({ db, save, showToast }) {
               <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 14, color: C.aqua, flex: "0 0 auto" }}>{fmt(r.remainingKg)} kg</div>
               <select value={assignKoyo[r.id] || ""} onChange={(e) => setAssignKoyo({ ...assignKoyo, [r.id]: e.target.value })} style={{ ...inputStyle, flex: "1 1 140px" }}>
                 <option value="">Pick a Koyo</option>
-                {KOYOS.map((k) => <option key={k} value={k}>{k}</option>)}
+                {koyos.map((k) => <option key={k} value={k}>{k}</option>)}
               </select>
               <button onClick={() => assignToKoyo(r.id)} style={ghostBtn}>Assign</button>
             </div>
@@ -1094,37 +1174,45 @@ function Production({ db, save, showToast }) {
               <span>{fmt(r.remainingKg)} / {fmt(r.loadedKg)} kg left</span>
             </div>
             <div style={{ height: 10, borderRadius: 5, background: "rgba(255,255,255,0.06)", overflow: "hidden", border: `1px solid ${C.line}` }}>
-              <div style={{ height: "100%", width: `${(r.remainingKg / r.loadedKg) * 100}%`, background: C.amber }} />
+              <div style={{ height: "100%", width: `${r.loadedKg ? (r.remainingKg / r.loadedKg) * 100 : 0}%`, background: C.amber }} />
             </div>
           </div>
         ))}
-        <div style={{ fontSize: 11, color: C.mute, marginTop: 4 }}>A roll disappears from this list the moment its remaining weight hits zero — that's your confirmation it's fully used. Every roll has to come from an Inventory intake entry first — there's no way to add one here directly.</div>
+        <div style={{ fontSize: 11, color: C.mute, marginTop: 4 }}>A roll disappears from this list the moment its remaining weight hits zero. Every roll has to come from an Inventory intake entry first.</div>
       </Card>
 
       <Card title="Log production run">
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <Field label="Date"><input type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Date">
+            <input type="date" value={todayStr()} readOnly style={{ ...inputStyle, opacity: 0.8 }} />
+          </Field>
           <Field label="Koyo">
-            <select value={f.koyo} onChange={(e) => setF({ ...f, koyo: e.target.value })} style={inputStyle}>
+            <select value={f.koyo} onChange={(e) => {
+              const koyo = e.target.value;
+              const roll = db.rolls.find((r) => r.row === koyo && r.remainingKg > 0);
+              setF({ ...f, koyo, rollId: roll?.id || "" });
+            }} style={inputStyle}>
               <option value="">— select —</option>
-              {KOYOS.map((k) => <option key={k} value={k}>{k}</option>)}
+              {koyos.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           </Field>
         </div>
         <Field label="Drawing from roll">
-          <select value={f.rollId} onChange={(e) => setF({ ...f, rollId: e.target.value })} style={inputStyle}>
-            <option value="">— not tracked by roll —</option>
-            {activeRolls.map((r) => <option key={r.id} value={r.id}>{fmt(r.remainingKg)} kg left{r.row ? ` · ${r.row}` : " · in stock"}</option>)}
+          <select value={f.rollId} onChange={(e) => setF({ ...f, rollId: e.target.value })} style={inputStyle} disabled={!f.koyo}>
+            <option value="">{f.koyo ? "— select assigned roll —" : "— select Koyo first —"}</option>
+            {activeRolls.filter((r) => r.row === f.koyo).map((r) => <option key={r.id} value={r.id}>{fmt(r.remainingKg)} kg left · {r.label}</option>)}
           </select>
         </Field>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <Field label="Raw material used (kg)"><input type="number" value={f.rawUsedKg} onChange={(e) => setF({ ...f, rawUsedKg: e.target.value })} style={inputStyle} /></Field>
-          <Field label="Bags produced"><input type="number" value={f.produced} onChange={(e) => setF({ ...f, produced: e.target.value })} style={inputStyle} /></Field>
-          <Field label="Leakages / rejects"><input type="number" value={f.leakage} onChange={(e) => setF({ ...f, leakage: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Raw material used (kg)"><input type="number" min="0" step="0.01" value={f.rawUsedKg} onChange={(e) => setF({ ...f, rawUsedKg: e.target.value })} style={inputStyle} disabled={!f.rollId} /></Field>
+          <Field label="Bags produced"><input type="number" min="1" value={f.produced} onChange={(e) => setF({ ...f, produced: e.target.value })} style={inputStyle} disabled={!f.rollId} /></Field>
+          <Field label="Leakages / rejects"><input type="number" min="0" value={f.leakage} onChange={(e) => setF({ ...f, leakage: e.target.value })} style={inputStyle} disabled={!f.rollId} /></Field>
         </div>
-        {!f.rollId && <div style={{ fontSize: 12, color: C.mute, marginBottom: 8 }}>Not linked to a roll — pick one above so this run reduces a specific roll's remaining weight.</div>}
-        <div style={{ fontFamily: "'IBM Plex Mono',monospace", color: C.aqua, marginBottom: 12 }}>Net sellable: {fmt(net)}</div>
-        <PrimaryBtn onClick={submit}><Plus size={16} /> Log run</PrimaryBtn>
+        {!f.koyo && <div style={{ fontSize: 12, color: C.amber, marginBottom: 8 }}>Production is unavailable until a Koyo is selected.</div>}
+        {f.koyo && !selectedKoyoRoll && <div style={{ fontSize: 12, color: C.amber, marginBottom: 8 }}>Production is unavailable because {f.koyo} has no active roll assigned.</div>}
+        {f.koyo && selectedKoyoRoll && availablePackaging <= 0 && <div style={{ fontSize: 12, color: C.amber, marginBottom: 8 }}>Production is unavailable because there are no packaging bags in inventory.</div>}
+        <div style={{ fontFamily: "'IBM Plex Mono',monospace", color: C.aqua, marginBottom: 12 }}>Packaging bags available: {fmt(availablePackaging)} · Net sellable: {fmt(net)}</div>
+        <PrimaryBtn onClick={submit} disabled={!f.koyo || !f.rollId || availablePackaging <= 0} style={{ opacity: (!f.koyo || !f.rollId || availablePackaging <= 0) ? 0.55 : 1, cursor: (!f.koyo || !f.rollId || availablePackaging <= 0) ? "not-allowed" : "pointer" }}><Plus size={16} /> Log run</PrimaryBtn>
       </Card>
 
       <Card title="Recent runs" right={<button onClick={() => exportCSV("production.csv", db.production)} style={ghostBtn}><Download size={14} /> CSV</button>}>
@@ -1145,7 +1233,7 @@ function RowGauge({ p, onDelete }) {
         <span>{p.date} · {p.koyo || "no Koyo set"}</span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
           {fmt(p.net)} / {fmt(p.produced)} sellable
-          <DeleteBtn onConfirm={onDelete} confirmMsg="Delete this run? This will add the bags back to empty/finished stock and, if it drew from a roll, add the kg back to that roll." />
+          <DeleteBtn onConfirm={onDelete} confirmMsg="Delete this run? This will add the bags back to packaging/finished stock and, if it drew from a roll, add the kg back to that roll." />
         </span>
       </div>
       <div style={{ height: 14, borderRadius: 7, background: "rgba(232,96,76,0.28)", overflow: "hidden", border: `1px solid ${C.line}` }}>

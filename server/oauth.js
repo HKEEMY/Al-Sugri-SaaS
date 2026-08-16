@@ -94,6 +94,7 @@ export function buildAuthorizeUrl(providerName) {
   }
 
   pending.set(state, record);
+  console.info(`[oauth] ${providerName} authorize redirect=${redirectUriFor(providerName)} clientConfigured=${Boolean(provider.clientId())}`);
   return `${provider.authUrl}?${params.toString()}`;
 }
 
@@ -134,6 +135,7 @@ export async function handleCallback(providerName, { code, state, error }) {
   });
   const tokenJson = await tokenRes.json().catch(() => ({}));
   if (!tokenRes.ok || !tokenJson.access_token) {
+    console.error(`[oauth] ${providerName} token exchange failed status=${tokenRes.status} error=${tokenJson.error || "unknown"} description=${tokenJson.error_description || "none"}`);
     const err = new Error(tokenJson.error_description || `${providerName} sign-in failed`);
     err.status = 400;
     throw err;
@@ -144,6 +146,7 @@ export async function handleCallback(providerName, { code, state, error }) {
   });
   const profileJson = await profileRes.json().catch(() => ({}));
   if (!profileRes.ok) {
+    console.error(`[oauth] ${providerName} profile request failed status=${profileRes.status}`);
     const err = new Error(`Could not read ${providerName} profile`);
     err.status = 400;
     throw err;

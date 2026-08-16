@@ -69,6 +69,170 @@ function canWrite(membership) {
   return ["owner", "supervisor", "seller"].includes(membership.role);
 }
 
+const DEFAULT_KOYOS = ["Koyo 1", "Koyo 2"];
+
+function serverToday() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function normalizeFactoryData(data) {
+  const next = { ...(data || {}) };
+  next.inventory = {
+    emptyBags: Number(next.inventory?.emptyBags) || 0,
+    finishedBags: Number(next.inventory?.finishedBags) || 0,
+  };
+  next.intake = Array.isArray(next.intake) ? next.intake : [];
+  next.rolls = Array.isArray(next.rolls) ? next.rolls : [];
+  next.production = Array.isArray(next.production) ? next.production : [];
+  next.expenses = Array.isArray(next.expenses) ? next.expenses : [];
+  next.salesFactory = Array.isArray(next.salesFactory) ? next.salesFactory : [];
+  next.salesMobile = Array.isArray(next.salesMobile) ? next.salesMobile : [];
+  next.sellers = Array.isArray(next.sellers) ? next.sellers : [];
+  next.koyos = Array.isArray(next.koyos) && next.koyos.length
+    ? [...new Set(next.koyos.map((k) => String(k).trim()).filter(Boolean))]
+    : [...DEFAULT_KOYOS];
+  return next;
+}
+
+function validationError(message) {
+  const err = new Error(message);
+  err.status = 422;
+  return err;
+}
+
+/**
+ * Business rules that must be enforced by the API, not just by the React UI.
+ * The existing JSON-store architecture means the client submits a whole
+ * organization document, so we validate the transition from the stored state
+ * to the requested state.
+ */
+function validateFactoryTransition(currentRaw, incomingRaw, membership) {
+  const current = normalizeFactoryData(currentRaw);
+  const incoming = normalizeFactoryData(incomingRaw);
+
+  if (incoming.inventory.emptyBags < 0 || incoming.inventory.finishedBags < 0) {
+    throw validationError("Inventory quantities cannot be negative.");
+  }
+
+  const currentProductions = new Map((current.production || []).map((p) => [p.id, p]));
+  const incomingProductions = new Map((incoming.production || []).map((p) => [p.id, p]));
+  const today = serverToday();
+
+  // Production records may not be backdated/forward-dated when created, and
+  // existing production records cannot be edited in-place.
+  for (const p of incoming.production) {
+    if (!p?.id) throw validationError("Every production record must have an id.");
+    const existing = currentProductions.get(p.id);
+    if (!existing) {
+      if (p.date !== today) {
+        throw validationError(`Production can only be recorded for today (${today}).`);
+      }
+      if (!p.koyo || !incoming.koyos.includes(p.koyo)) {
+        throw validationError("Production requires a valid assigned Koyo.");
+      }
+      if (!p.rollId) {
+        throw validationError("Production requires a roll assigned to the selected Koyo.");
+      }
+      const roll = current.rolls.find((r) => r.id === p.rollId);
+      if (!roll) throw validationError("The selected production roll does not exist.");
+      if (roll.row !== p.koyo) {
+        throw validationError("The selected roll is not assigned to the selected Koyo.");
+      }
+      if (!(Number(p.produced) > 0)) throw validationError("Production quantity must be greater than zero.");
+      if (!(Number(p.rawUsedKg) > 0)) throw validationError("Raw material used must be greater than zero.");
+      if (!(Number(p.leakage) >= 0 && Number(p.leakage) <= Number(p.produced))) {
+        throw validationError("Leakages/rejects must be between zero and bags produced.");
+      }
+    } else if (JSON.stringify(existing) !== JSON.stringify(p)) {
+      throw validationError("Existing production records cannot be edited. Use the authorized correction process.");
+    }
+  }
+
+  // Deleted production is allowed only for today's records and only to
+  // owner/supervisor. This keeps ordinary users from silently rewriting history.
+  for (const [id, existing] of currentProductions) {
+    if (!incomingProductions.has(id)) {
+      if (existing.date !== today) {
+        throw validationError("Historical production records cannot be deleted.");
+      }
+      if (!["owner", "supervisor"].includes(membership.role)) {
+        throw validationError("You are not authorized to delete production records.");
+      }
+    }
+  }
+
+  // Check newly-added production against the inventory and roll quantities that
+  // existed before this request. A client cannot manufacture inventory simply
+  // by submitting a larger inventory number in the same request.
+  let packagingAvailable = Number(current.inventory.emptyBags) || 0;
+  const rollRemaining = new Map(current.rolls.map((r) => [r.id, Number(r.remainingKg) || 0]));
+
+  // Deletions restore their resources before any same-request additions.
+  for (const [id, existing] of currentProductions) {
+    if (!incomingProductions.has(id)) {
+      packagingAvailable += Number(existing.produced) || 0;
+      if (existing.rollId) {
+        rollRemaining.set(
+          existing.rollId,
+          (rollRemaining.get(existing.rollId) || 0) + (Number(existing.rawUsedKg) || 0)
+        );
+      }
+    }
+  }
+
+  const added = incoming.production.filter((p) => !currentProductions.has(p.id));
+  for (const p of added) {
+    const produced = Number(p.produced) || 0;
+    const rawUsed = Number(p.rawUsedKg) || 0;
+    if (produced > packagingAvailable) {
+      throw validationError(
+        `Production blocked: only ${packagingAvailable.toLocaleString()} packaging bags are available, but ${produced.toLocaleString()} were requested.`
+      );
+    }
+    const rollAvailable = rollRemaining.get(p.rollId);
+    if (rollAvailable == null) throw validationError("The selected production roll is unavailable.");
+    if (rawUsed > rollAvailable) {
+      throw validationError(
+        `Production blocked: the selected roll has only ${rollAvailable.toLocaleString()} kg remaining.`
+      );
+    }
+    packagingAvailable -= produced;
+    rollRemaining.set(p.rollId, rollAvailable - rawUsed);
+  }
+
+  // The client must reflect the production consumption in its submitted state.
+  const expectedPackaging = packagingAvailable;
+  if (added.length || [...currentProductions.keys()].some((id) => !incomingProductions.has(id))) {
+    if (Number(incoming.inventory.emptyBags) !== expectedPackaging) {
+      throw validationError(
+        `Packaging-bag inventory is inconsistent with production. Expected ${expectedPackaging.toLocaleString()} bags after this change.`
+      );
+    }
+  }
+
+  // Any newly assigned/changed roll must reference a configured Koyo.
+  for (const r of incoming.rolls) {
+    if (r.row && !incoming.koyos.includes(r.row)) {
+      throw validationError(`Roll ${r.label || r.id} is assigned to a Koyo that does not exist.`);
+    }
+  }
+
+  // Prevent removing a Koyo that is referenced by a roll or production history.
+  const currentKoyos = new Set(current.koyos);
+  const incomingKoyos = new Set(incoming.koyos);
+  for (const koyo of currentKoyos) {
+    if (!incomingKoyos.has(koyo)) {
+      const referenced = current.rolls.some((r) => r.row === koyo) ||
+        current.production.some((p) => p.koyo === koyo);
+      if (referenced) {
+        throw validationError(`${koyo} cannot be removed because existing records reference it.`);
+      }
+    }
+  }
+
+  return incoming;
+}
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -79,7 +243,7 @@ const FRONTEND_URL = (process.env.APP_URL || "").replace(/\/$/, "");
 
 // ---------- Public ----------
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, product: "Al Sugri Ops SaaS", version: "2.1.0" });
+  res.json({ ok: true, product: "Al Sugri Ops SaaS", version: "2.2.0" });
 });
 
 app.post("/api/auth/signup", authLimiter, (req, res) => {
@@ -246,11 +410,14 @@ app.put("/api/orgs/:orgId/db", authRequired, requireOrgMember, (req, res) => {
     delete payload.updatedAt;
     delete payload._membership;
 
+    const current = getOrgData(req.params.orgId).data;
+
     // Sellers: only sales + seller balances may change
     if (req.membership.role === "seller") {
-      const current = getOrgData(req.params.orgId).data;
       payload = applySellerWriteFilter(current, payload);
     }
+
+    payload = validateFactoryTransition(current, payload, req.membership);
 
     const { data, version, updatedAt } = putOrgData(req.params.orgId, payload, expectedVersion);
 

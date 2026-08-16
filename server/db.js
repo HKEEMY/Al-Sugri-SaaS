@@ -30,6 +30,7 @@ function writeStore(store) {
 export function emptyFactoryData() {
   return {
     inventory: { emptyBags: 0, finishedBags: 0 },
+    koyos: ["Koyo 1", "Koyo 2"],
     intake: [],
     rolls: [],
     production: [],
